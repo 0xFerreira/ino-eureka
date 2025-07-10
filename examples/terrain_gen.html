@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Advanced Procedural Cave Generation</title>
+        <style>
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    Helvetica, Arial, sans-serif;
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                margin: 0;
+                padding: 1rem;
+            }
+            canvas {
+                background-color: #000;
+                border: 2px solid #444;
+                border-radius: 8px;
+                margin-bottom: 1rem;
+                max-width: 100%;
+                height: auto;
+            }
+            .controls {
+                background-color: #2a2a2a;
+                padding: 1rem;
+                border-radius: 8px;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 1rem;
+                width: 100%;
+                max-width: 1000px;
+                box-sizing: border-box;
+            }
+            .control-group {
+                display: flex;
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+            .button-group {
+                grid-column: 1 / -1;
+                display: flex;
+                justify-content: center;
+                gap: 1rem;
+            }
+            button {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                font-size: 16px;
+                border-radius: 5px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+                flex-grow: 1;
+            }
+            button:hover {
+                background-color: #0056b3;
+            }
+            button:disabled {
+                background-color: #555;
+                cursor: not-allowed;
+            }
+            label {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+            }
+            input[type="range"] {
+                width: 120px;
+            }
+            .seed-control {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+            }
+            .seed-control input[type="text"] {
+                flex-grow: 1;
+                margin-right: 8px;
+            }
+            .seed-control button {
+                padding: 5px 10px;
+                font-size: 14px;
+                flex-grow: 0;
+            }
+            input[type="text"] {
+                background-color: #333;
+                border: 1px solid #555;
+                color: #e0e0e0;
+                padding: 5px;
+                border-radius: 3px;
+                width: 100px;
+            }
+            .status-container {
+                margin-top: 1rem;
+                padding: 1rem;
+                background-color: #2a2a2a;
+                border-radius: 8px;
+                width: 100%;
+                max-width: 1000px;
+                min-height: 2em;
+                box-sizing: border-box;
+                text-align: center;
+                font-family: monospace;
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="worldCanvas"></canvas>
+        <div class="controls">
+            <div class="button-group">
+                <button id="generateButton">Generate New World</button>
+            </div>
+            <div class="control-group">
+                <label
+                    ><span>Fill %:</span
+                    ><input
+                        type="range"
+                        id="fillSlider"
+                        min="35"
+                        max="65"
+                        value="48"
+                    /><span id="fillValue">48%</span></label
+                >
+                <label
+                    ><span>Sim Steps:</span
+                    ><input
+                        type="range"
+                        id="stepsSlider"
+                        min="1"
+                        max="15"
+                        value="6"
+                    /><span id="stepsValue">6</span></label
+                >
+            </div>
+            <div class="control-group">
+                <label
+                    ><span>Horizontal Bias:</span
+                    ><input
+                        type="range"
+                        id="hBiasSlider"
+                        min="0.5"
+                        max="2.0"
+                        value="1.0"
+                        step="0.1"
+                    /><span id="hBiasValue">1.0</span></label
+                >
+                <label
+                    ><span>Vertical Bias:</span
+                    ><input
+                        type="range"
+                        id="vBiasSlider"
+                        min="0.5"
+                        max="2.0"
+                        value="1.0"
+                        step="0.1"
+                    /><span id="vBiasValue">1.0</span></label
+                >
+            </div>
+            <div class="control-group">
+                <label
+                    ><span>Anim Speed (ms):</span
+                    ><input
+                        type="range"
+                        id="speedSlider"
+                        min="0"
+                        max="200"
+                        value="50"
+                    /><span id="speedValue">50</span></label
+                >
+                <label for="seedInput">Seed:</label>
+                <div class="seed-control">
+                    <input type="text" id="seedInput" />
+                    <button id="randomSeedButton">🎲</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="statusContainer" class="status-container">
+            Click "Generate" to create a new world!
+        </div>
+
+        <script>
+            // --- Seeded Random Number Generator ---
+            class SeededRandom {
+                constructor(seed) {
+                    this.seed = seed % 2147483647;
+                    if (this.seed <= 0) this.seed += 2147483646;
+                }
+                // Park-Miller LCG
+                next() {
+                    this.seed = (this.seed * 48271) % 2147483647;
+                    return (this.seed - 1) / 2147483646;
+                }
+            }
+
+            // --- Perlin Noise Implementation (for biomes) ---
+            const p = new Uint8Array(512);
+            function setupPerlin(random) {
+                for (let i = 0; i < 256; i++)
+                    p[i] = p[i + 256] = Math.floor(random.next() * 256);
+            }
+            function fade(t) {
+                return t * t * t * (t * (t * 6 - 15) + 10);
+            }
+            function lerp(t, a, b) {
+                return a + t * (b - a);
+            }
+            function grad(hash, x, y) {
+                const h = hash & 15;
+                const u = h < 8 ? x : y;
+                const v = h < 4 ? y : h === 12 || h === 14 ? x : 0;
+                return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+            }
+            function noise(x, y) {
+                const X = Math.floor(x) & 255,
+                    Y = Math.floor(y) & 255;
+                x -= Math.floor(x);
+                y -= Math.floor(y);
+                const u = fade(x),
+                    v = fade(y);
+                const a = p[X] + Y,
+                    b = p[X + 1] + Y;
+                return lerp(
+                    v,
+                    lerp(u, grad(p[a], x, y), grad(p[b], x - 1, y)),
+                    lerp(
+                        u,
+                        grad(p[a + 1], x, y - 1),
+                        grad(p[b + 1], x - 1, y - 1),
+                    ),
+                );
+            }
+
+            // --- Configuration ---
+            const TILE_SIZE = 4;
+            const WIDTH = 600;
+            const HEIGHT = 300;
+            const TILE_TYPE = {
+                EMPTY: 0,
+                STONE: 1,
+                DIRT: 2,
+                ABYSSALITE: 3,
+                ALGAE: 4,
+            };
+            const TILE_COLOR = {
+                [TILE_TYPE.EMPTY]: "#1a1a1a",
+                [TILE_TYPE.STONE]: "#636363",
+                [TILE_TYPE.DIRT]: "#5d4037",
+                [TILE_TYPE.ABYSSALITE]: "#2c003e",
+                [TILE_TYPE.ALGAE]: "#4caf50",
+            };
+
+            // --- DOM Elements ---
+            const ui = {
+                canvas: document.getElementById("worldCanvas"),
+                ctx: document.getElementById("worldCanvas").getContext("2d"),
+                generateButton: document.getElementById("generateButton"),
+                fillSlider: document.getElementById("fillSlider"),
+                fillValue: document.getElementById("fillValue"),
+                stepsSlider: document.getElementById("stepsSlider"),
+                stepsValue: document.getElementById("stepsValue"),
+                hBiasSlider: document.getElementById("hBiasSlider"),
+                hBiasValue: document.getElementById("hBiasValue"),
+                vBiasSlider: document.getElementById("vBiasSlider"),
+                vBiasValue: document.getElementById("vBiasValue"),
+                speedSlider: document.getElementById("speedSlider"),
+                speedValue: document.getElementById("speedValue"),
+                seedInput: document.getElementById("seedInput"),
+                randomSeedButton: document.getElementById("randomSeedButton"),
+                statusContainer: document.getElementById("statusContainer"),
+            };
+
+            ui.canvas.width = WIDTH * TILE_SIZE;
+            ui.canvas.height = HEIGHT * TILE_SIZE;
+
+            let world = [];
+            let isGenerating = false;
+
+            // --- Core Logic ---
+
+            function sleep(ms) {
+                return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            function setControlsDisabled(disabled) {
+                isGenerating = disabled;
+                ui.generateButton.disabled = disabled;
+                ui.fillSlider.disabled = disabled;
+                ui.stepsSlider.disabled = disabled;
+                ui.hBiasSlider.disabled = disabled;
+                ui.vBiasSlider.disabled = disabled;
+                ui.seedInput.disabled = disabled;
+                ui.randomSeedButton.disabled = disabled;
+            }
+
+            function initializeWorld(fillPercent, random) {
+                const biomeNoiseScale = 0.04;
+                const algaeNoiseScale = 0.1;
+
+                world = Array.from({ length: HEIGHT }, (v, y) =>
+                    Array.from({ length: WIDTH }, (v, x) => {
+                        const biomeValue = noise(
+                            x * biomeNoiseScale,
+                            y * biomeNoiseScale,
+                        );
+                        let baseTile =
+                            biomeValue > 0 ? TILE_TYPE.STONE : TILE_TYPE.DIRT;
+
+                        if (baseTile === TILE_TYPE.DIRT) {
+                            const algaeValue = noise(
+                                x * algaeNoiseScale + 100,
+                                y * algaeNoiseScale + 100,
+                            ); // Offset noise
+                            if (algaeValue > 0.45) {
+                                // Increased algae frequency
+                                baseTile = TILE_TYPE.ALGAE;
+                            }
+                        }
+
+                        return random.next() * 100 < fillPercent
+                            ? baseTile
+                            : TILE_TYPE.EMPTY;
+                    }),
+                );
+            }
+
+            function demarcateBiomes() {
+                const nextWorld = world.map((arr) => arr.slice());
+                for (let y = 0; y < HEIGHT; y++) {
+                    for (let x = 0; x < WIDTH; x++) {
+                        const currentTile = world[y][x];
+                        if (currentTile === TILE_TYPE.EMPTY) continue;
+
+                        for (let ny = y - 1; ny <= y + 1; ny++) {
+                            for (let nx = x - 1; nx <= x + 1; nx++) {
+                                if (ny === y && nx === x) continue;
+
+                                const neighbor = world[ny]?.[nx];
+                                if (
+                                    neighbor !== undefined &&
+                                    neighbor !== TILE_TYPE.EMPTY &&
+                                    neighbor !== currentTile
+                                ) {
+                                    nextWorld[y][x] = TILE_TYPE.ABYSSALITE;
+                                    // Break outer loop as well
+                                    ny = y + 2;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                world = nextWorld;
+            }
+
+            function countWallNeighbors(gridX, gridY, hBias, vBias) {
+                let wallCount = 0;
+                for (let y = gridY - 1; y <= gridY + 1; y++) {
+                    for (let x = gridX - 1; x <= gridX + 1; x++) {
+                        if (x === gridX && y === gridY) continue;
+
+                        let weight = 1.0;
+                        if (x === gridX) weight = vBias;
+                        if (y === gridY) weight = hBias;
+
+                        if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+                            wallCount += weight;
+                        } else if (world[y][x] !== TILE_TYPE.EMPTY) {
+                            wallCount += weight;
+                        }
+                    }
+                }
+                return wallCount;
+            }
+
+            function runSimulationStep(hBias, vBias) {
+                const nextWorld = world.map((arr) => arr.slice());
+                for (let y = 0; y < HEIGHT; y++) {
+                    for (let x = 0; x < WIDTH; x++) {
+                        if (world[y][x] === TILE_TYPE.ABYSSALITE) continue;
+
+                        const neighbors = countWallNeighbors(
+                            x,
+                            y,
+                            hBias,
+                            vBias,
+                        );
+                        const currentTile = world[y][x];
+
+                        if (currentTile !== TILE_TYPE.EMPTY) {
+                            if (neighbors < 4)
+                                nextWorld[y][x] = TILE_TYPE.EMPTY;
+                        } else {
+                            if (neighbors >= 5) {
+                                nextWorld[y][x] = TILE_TYPE.STONE;
+                            }
+                        }
+                    }
+                }
+                world = nextWorld;
+            }
+
+            function drawWorld() {
+                ui.ctx.clearRect(0, 0, ui.canvas.width, ui.canvas.height);
+                for (let y = 0; y < HEIGHT; y++) {
+                    for (let x = 0; x < WIDTH; x++) {
+                        ui.ctx.fillStyle = TILE_COLOR[world[y][x]];
+                        ui.ctx.fillRect(
+                            x * TILE_SIZE,
+                            y * TILE_SIZE,
+                            TILE_SIZE,
+                            TILE_SIZE,
+                        );
+                    }
+                }
+            }
+
+            function randomizeSeed() {
+                ui.seedInput.value = Math.floor(Math.random() * 1000000000);
+            }
+
+            async function generate() {
+                if (isGenerating) return;
+                randomizeSeed();
+                setControlsDisabled(true);
+                ui.statusContainer.textContent = "Generating world...";
+
+                let seed = parseInt(ui.seedInput.value, 10);
+                if (isNaN(seed) || seed === 0) {
+                    randomizeSeed();
+                    seed = parseInt(ui.seedInput.value, 10);
+                }
+
+                const random = new SeededRandom(seed);
+                setupPerlin(random);
+
+                const fillPercent = parseInt(ui.fillSlider.value, 10);
+                const simulationSteps = parseInt(ui.stepsSlider.value, 10);
+                const hBias = parseFloat(ui.hBiasSlider.value);
+                const vBias = parseFloat(ui.vBiasSlider.value);
+                const animSpeed = parseInt(ui.speedSlider.value, 10);
+
+                initializeWorld(fillPercent, random);
+                demarcateBiomes();
+                drawWorld();
+                await sleep(animSpeed > 0 ? 200 : 0);
+
+                for (let i = 0; i < simulationSteps; i++) {
+                    if (animSpeed > 0)
+                        ui.statusContainer.textContent = `Carving caves... Step ${i + 1} of ${simulationSteps}`;
+                    runSimulationStep(hBias, vBias);
+                    drawWorld();
+                    await sleep(animSpeed);
+                }
+
+                ui.statusContainer.textContent = "Generation complete!";
+                setControlsDisabled(false);
+            }
+
+            // --- Event Listeners ---
+            const sliders = [
+                { el: ui.fillSlider, valEl: ui.fillValue, suffix: "%" },
+                { el: ui.stepsSlider, valEl: ui.stepsValue, suffix: "" },
+                { el: ui.hBiasSlider, valEl: ui.hBiasValue, suffix: "" },
+                { el: ui.vBiasSlider, valEl: ui.vBiasValue, suffix: "" },
+                { el: ui.speedSlider, valEl: ui.speedValue, suffix: "ms" },
+            ];
+            sliders.forEach(({ el, valEl, suffix }) => {
+                el.addEventListener("input", (e) => {
+                    valEl.textContent = `${e.target.value}${suffix}`;
+                });
+            });
+            ui.generateButton.addEventListener("click", generate);
+            ui.randomSeedButton.addEventListener("click", randomizeSeed);
+
+            window.onload = generate;
+        </script>
+    </body>
+</html>

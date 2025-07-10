@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Shadow Mapping with High Contrast</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2, h3 {
+            color: #f0f0f0;
+            border-bottom: 2px solid #444;
+            padding-bottom: 5px;
+            text-align: center;
+        }
+        canvas {
+            background-color: #2c3e50;
+            border: 1px solid #7f8c8d;
+            margin-bottom: 20px;
+            border-radius: 8px;
+        }
+        .controls-container {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+        }
+        .controls {
+            display: grid;
+            grid-template-columns: 150px 300px 50px;
+            gap: 10px;
+            align-items: center;
+            background-color: #34495e;
+            padding: 20px;
+            border-radius: 8px;
+            width: 520px;
+        }
+        .controls label {
+            font-weight: bold;
+        }
+        .controls input[type="range"] {
+            width: 100%;
+        }
+        .animation-controls {
+            background-color: #34495e;
+            padding: 20px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>2D Shadow Mapping with High Contrast</h2>
+    <canvas id="mainCanvas" width="512" height="512"></canvas>
+    
+    <h3>Controls & Visualization</h3>
+    <div class="controls-container">
+        <div class="controls">
+            <!-- Light Position Controls -->
+            <label for="lightX">Light X Position:</label>
+            <input type="range" id="lightX" min="0" max="512" value="256">
+            <span id="lightXValue">256</span>
+
+            <label for="lightY">Light Y Position:</label>
+            <input type="range" id="lightY" min="0" max="512" value="256">
+            <span id="lightYValue">256</span>
+            
+            <!-- Light Radius Control -->
+            <label for="lightRadius">Light Radius:</label>
+            <input type="range" id="lightRadius" min="50" max="500" value="300">
+            <span id="lightRadiusValue">300</span>
+
+            <!-- NEW: Light Intensity Control -->
+            <label for="lightIntensity">Light Intensity:</label>
+            <input type="range" id="lightIntensity" min="0" max="1" step="0.05" value="0.9">
+            <span id="lightIntensityValue">0.9</span>
+
+            <!-- Shadow Map Resolution Control -->
+            <label for="shadowMapRes">Shadow Map Quality:</label>
+            <input type="range" id="shadowMapRes" min="64" max="1024" step="64" value="512">
+            <span id="shadowMapResValue">512</span>
+
+            <!-- Visualization Mode Control -->
+            <label for="viewMode">View Mode:</label>
+            <select id="viewMode" style="grid-column: 2 / 4;">
+                <option value="final">Final Scene</option>
+                <option value="shadowMap">1D Shadow Map (Data)</option>
+                <option value="lightView">Light's Raycast View</option>
+            </select>
+        </div>
+        <div class="animation-controls">
+            <label for="toggleMovement">Animate Objects:</label>
+            <input type="checkbox" id="toggleMovement" checked>
+        </div>
+    </div>
+
+<script>
+// --- CORE SETUP ---
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d');
+const controls = {
+    lightX: document.getElementById('lightX'),
+    lightY: document.getElementById('lightY'),
+    lightRadius: document.getElementById('lightRadius'),
+    lightIntensity: document.getElementById('lightIntensity'),
+    shadowMapRes: document.getElementById('shadowMapRes'),
+    viewMode: document.getElementById('viewMode'),
+    toggleMovement: document.getElementById('toggleMovement'),
+    lightXValue: document.getElementById('lightXValue'),
+    lightYValue: document.getElementById('lightYValue'),
+    lightRadiusValue: document.getElementById('lightRadiusValue'),
+    lightIntensityValue: document.getElementById('lightIntensityValue'),
+    shadowMapResValue: document.getElementById('shadowMapResValue'),
+};
+
+// --- DATA REPRESENTATION ---
+const staticShadowCasters = [
+    { type: 'rect', x: 50,  y: 50,  w: 80, h: 80 },
+    { type: 'rect', x: 400, y: 100, w: 50, h: 200 },
+    { type: 'rect', x: 100, y: 400, w: 250, h: 40 },
+];
+
+const movingShadowCasters = [
+    { type: 'circle', x: 100, y: 250, r: 25, vx: 1.5, vy: -1 },
+    { type: 'rect', x: 300, y: 200, w: 40, h: 40, vx: -1, vy: 1.2 }
+];
+
+// Light source data object - now with intensity!
+const light = {
+    x: parseInt(controls.lightX.value, 10),
+    y: parseInt(controls.lightY.value, 10),
+    radius: parseInt(controls.lightRadius.value, 10),
+    intensity: parseFloat(controls.lightIntensity.value)
+};
+
+let shadowMap = [];
+let shadowMapResolution = parseInt(controls.shadowMapRes.value, 10);
+let isAnimating = controls.toggleMovement.checked;
+
+// --- HELPER FUNCTIONS ---
+
+function getIntersection(a, b, c, d) {
+    const tTop = (d.x - c.x) * (a.y - c.y) - (d.y - c.y) * (a.x - c.x);
+    const uTop = (c.y - a.y) * (a.x - b.x) - (c.x - a.x) * (a.y - b.y);
+    const bottom = (d.y - c.y) * (b.x - a.x) - (d.x - c.x) * (b.y - a.y);
+
+    if (bottom !== 0) {
+        const t = tTop / bottom;
+        const u = uTop / bottom;
+        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+            return {
+                x: a.x + t * (b.x - a.x),
+                y: a.y + t * (b.y - a.y),
+                dist: Math.hypot(a.x - (a.x + t * (b.x - a.x)), a.y - (a.y + t * (b.y - a.y)))
+            };
+        }
+    }
+    return null;
+}
+
+function getCasterSegments() {
+    const segments = [];
+    const allCasters = [...staticShadowCasters, ...movingShadowCasters];
+
+    for (const caster of allCasters) {
+        if (caster.type === 'rect') {
+            const { x, y, w, h } = caster;
+            segments.push({ p1: {x: x, y: y}, p2: {x: x + w, y: y} });
+            segments.push({ p1: {x: x + w, y: y}, p2: {x: x + w, y: y + h} });
+            segments.push({ p1: {x: x + w, y: y + h}, p2: {x: x, y: y + h} });
+            segments.push({ p1: {x: x, y: y + h}, p2: {x: x, y: y} });
+        } else if (caster.type === 'circle') {
+            const sides = 20;
+            for (let i = 0; i < sides; i++) {
+                const angle1 = (i / sides) * Math.PI * 2;
+                const angle2 = ((i + 1) / sides) * Math.PI * 2;
+                segments.push({
+                    p1: { x: caster.x + Math.cos(angle1) * caster.r, y: caster.y + Math.sin(angle1) * caster.r },
+                    p2: { x: caster.x + Math.cos(angle2) * caster.r, y: caster.y + Math.sin(angle2) * caster.r },
+                });
+            }
+        }
+    }
+    return segments;
+}
+
+// --- SIMULATION STEP 1: Update Object State ---
+function updateState() {
+    if (!isAnimating) return;
+
+    for (const mover of movingShadowCasters) {
+        mover.x += mover.vx;
+        mover.y += mover.vy;
+
+        if (mover.type === 'rect') {
+            if (mover.x <= 0 || mover.x + mover.w >= canvas.width) mover.vx *= -1;
+            if (mover.y <= 0 || mover.y + mover.h >= canvas.height) mover.vy *= -1;
+        } else if (mover.type === 'circle') {
+            if (mover.x - mover.r <= 0 || mover.x + mover.r >= canvas.width) mover.vx *= -1;
+            if (mover.y - mover.r <= 0 || mover.y + mover.r >= canvas.height) mover.vy *= -1;
+        }
+    }
+}
+
+// --- SIMULATION STEP 2: Generate the Shadow Map ---
+function generateShadowMap() {
+    shadowMap = [];
+    const segments = getCasterSegments();
+    
+    for (let i = 0; i < shadowMapResolution; i++) {
+        const angle = (i / shadowMapResolution) * Math.PI * 2;
+        const ray = {
+            p1: { x: light.x, y: light.y },
+            p2: { x: light.x + Math.cos(angle) * light.radius, y: light.y + Math.sin(angle) * light.radius }
+        };
+        
+        let closestIntersectionDist = light.radius;
+        for (const seg of segments) {
+            const intersection = getIntersection(ray.p1, ray.p2, seg.p1, seg.p2);
+            if (intersection) {
+                const dist = Math.hypot(intersection.x - light.x, intersection.y - light.y);
+                if (dist < closestIntersectionDist) {
+                    closestIntersectionDist = dist;
+                }
+            }
+        }
+        shadowMap[i] = closestIntersectionDist;
+    }
+}
+
+// --- SIMULATION STEP 3: Render the Scene using the Shadow Map ---
+
+function drawSceneObjects() {
+    const allCasters = [...staticShadowCasters, ...movingShadowCasters];
+    ctx.strokeStyle = '#7f8c8d';
+    ctx.lineWidth = 2;
+
+    for (const caster of allCasters) {
+        ctx.fillStyle = caster.vx !== undefined ? '#e74c3c' : '#95a5a6'; // Red for movers
+        ctx.beginPath();
+        if (caster.type === 'rect') {
+            ctx.rect(caster.x, caster.y, caster.w, caster.h);
+        } else if (caster.type === 'circle') {
+            ctx.arc(caster.x, caster.y, caster.r, 0, Math.PI * 2);
+        }
+        ctx.fill();
+        ctx.stroke();
+    }
+}
+
+// REWRITTEN: This function now uses clipping for high-contrast lighting.
+function drawFinalScene() {
+    // 1. Fill the entire scene with black. This is our shadow color.
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 2. Create the geometric shape of the light based on the shadow map data.
+    ctx.beginPath();
+    ctx.moveTo(light.x, light.y);
+    for(let i = 0; i <= shadowMapResolution; i++) {
+        const angle = (i / shadowMapResolution) * Math.PI * 2;
+        const dist = shadowMap[i % shadowMapResolution];
+        ctx.lineTo(light.x + dist * Math.cos(angle), light.y + dist * Math.sin(angle));
+    }
+    ctx.closePath();
+
+    // 3. Save the current state and use the path as a clipping mask.
+    // From now on, drawing operations will only affect the area inside this shape.
+    ctx.save();
+    ctx.clip();
+
+    // 4. Inside the mask, draw the normal background and the light gradient.
+    ctx.fillStyle = '#2c3e50'; // The original background color
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const lightGradient = ctx.createRadialGradient(light.x, light.y, 0, light.x, light.y, light.radius);
+    const colorString = `rgba(255, 255, 220, ${light.intensity})`;
+    lightGradient.addColorStop(0, colorString);
+    lightGradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    
+    ctx.fillStyle = lightGradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 5. Restore the canvas state, removing the clipping mask.
+    ctx.restore();
+
+    // 6. Draw the scene objects and light source representation on top of everything.
+    drawSceneObjects();
+    
+    ctx.fillStyle = 'yellow';
+    ctx.beginPath();
+    ctx.arc(light.x, light.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+// --- VISUALIZATION MODES ---
+
+function drawLightView() {
+    drawSceneObjects();
+    ctx.strokeStyle = 'rgba(255, 255, 0, 0.2)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < shadowMapResolution; i++) {
+        const angle = (i / shadowMapResolution) * Math.PI * 2;
+        const dist = shadowMap[i];
+        ctx.beginPath();
+        ctx.moveTo(light.x, light.y);
+        ctx.lineTo(light.x + Math.cos(angle) * dist, light.y + Math.sin(angle) * dist);
+        ctx.stroke();
+    }
+    ctx.fillStyle = 'yellow';
+    ctx.beginPath();
+    ctx.arc(light.x, light.y, 10, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawShadowMapData() {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const barWidth = canvas.width / shadowMapResolution;
+    for (let i = 0; i < shadowMapResolution; i++) {
+        const dist = shadowMap[i];
+        const normalizedDist = dist / light.radius;
+        const barHeight = normalizedDist * canvas.height;
+        const grayValue = Math.floor(normalizedDist * 255);
+        ctx.fillStyle = `rgb(${grayValue}, ${grayValue}, ${grayValue})`;
+        ctx.fillRect(i * barWidth, canvas.height - barHeight, barWidth, barHeight);
+    }
+    ctx.fillStyle = 'white';
+    ctx.font = '16px monospace';
+    ctx.fillText("1D Shadow Map Data (Distance vs. Angle)", 10, 20);
+    ctx.fillText("<- 360 degrees ->", 10, 40);
+}
+
+// --- MAIN LOOP & EVENT LISTENERS ---
+function mainLoop() {
+    updateState();
+    generateShadowMap();
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const mode = controls.viewMode.value;
+    if (mode === 'final') {
+        drawFinalScene();
+    } else if (mode === 'lightView') {
+        // For light view, we need a background
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        drawLightView();
+    } else if (mode === 'shadowMap') {
+        drawShadowMapData();
+    }
+
+    requestAnimationFrame(mainLoop);
+}
+
+function setupEventListeners() {
+    // Sliders and dropdown
+    ['lightX', 'lightY', 'lightRadius', 'shadowMapRes', 'viewMode', 'lightIntensity'].forEach(key => {
+        controls[key].addEventListener('input', () => {
+            light.x = parseInt(controls.lightX.value, 10);
+            light.y = parseInt(controls.lightY.value, 10);
+            light.radius = parseInt(controls.lightRadius.value, 10);
+            light.intensity = parseFloat(controls.lightIntensity.value);
+            shadowMapResolution = parseInt(controls.shadowMapRes.value, 10);
+
+            controls.lightXValue.textContent = light.x;
+            controls.lightYValue.textContent = light.y;
+            controls.lightRadiusValue.textContent = light.radius;
+            controls.lightIntensityValue.textContent = light.intensity.toFixed(2);
+            controls.shadowMapResValue.textContent = shadowMapResolution;
+        });
+    });
+
+    controls.toggleMovement.addEventListener('change', (e) => {
+        isAnimating = e.target.checked;
+    });
+}
+
+setupEventListeners();
+mainLoop();
+
+</script>
+</body>
+</html>
+
